@@ -1,0 +1,13 @@
+[package]
+name = "ic-c-conformance"
+version = "0.1.0"
+edition = "2021"
+description = "Holds the C header and the Rust declarations to the same layout"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ic-plugin-api = { workspace = true }
+
+[build-dependencies]
+cc = "1"

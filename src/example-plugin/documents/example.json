@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "kind": "example",
+  "label": { "literal": "Example" },
+  "icon": "asset:ic-example-plugin/dot.svg",
+  "identity": "name",
+  "opens_at": "start_folder",
+  "summary": { "fmt": "{address}" },
+
+  "fields": [
+    { "bind": "name", "type": "text", "scope": "record", "required": true },
+    { "bind": "folder", "type": "text", "scope": "record", "empty_as_absent": true },
+    { "bind": "address", "type": "text", "required": true, "empty_as_absent": true },
+    { "bind": "start_folder", "type": "path", "empty_as_absent": true }
+  ],
+
+  "form": {
+    "t": "view",
+    "surface": "embedded",
+    "children": [
+      { "t": "input", "id": "name", "bind": "name",
+        "placeholder": { "tr": "example.summary", "en": "An example connection" } },
+      { "t": "input", "id": "address", "bind": "address",
+        "placeholder": { "tr": "example.address", "en": "Address" } },
+      { "t": "input", "id": "start_folder", "bind": "start_folder",
+        "placeholder": { "literal": "/" } }
+    ]
+  }
+}
