@@ -62,6 +62,7 @@ struct Opened {
     view: Vec<IcDirEntry>,
     bytes: Vec<u8>,
     error: CString,
+    said: CString,
 }
 
 /// The whole of the opened file, read through the host a chunk at a time.
@@ -201,7 +202,15 @@ extern "C" fn fs_is_read_only(_handle: IcFsHandle) -> c_int {
 }
 
 extern "C" fn fs_last_error(handle: IcFsHandle) -> *const c_char {
-    with_opened(handle, |opened| opened.error.as_ptr()).unwrap_or(std::ptr::null())
+    with_opened(handle, |opened| {
+        opened.said = std::mem::take(&mut opened.error);
+        if opened.said.as_bytes().is_empty() {
+            std::ptr::null()
+        } else {
+            opened.said.as_ptr()
+        }
+    })
+    .unwrap_or(std::ptr::null())
 }
 
 pub fn vtable() -> IcFsVTable {
@@ -465,6 +474,23 @@ mod tests {
 
         let asked = CString::new(WHOLE).expect("a path");
         assert_eq!(fs_read(handle, asked.as_ptr()).len, 0);
+        fs_close(handle);
+    }
+
+    #[test]
+    fn a_failure_is_handed_over_once_and_then_forgotten() {
+        let path = CString::new("x").unwrap();
+        let handle = fs_open_in(std::ptr::null_mut(), path.as_ptr(), std::ptr::null_mut());
+        assert!(fs_last_error(handle).is_null(), "nothing has failed yet");
+
+        let missing = CString::new("nope").unwrap();
+        assert_eq!(fs_read(handle, missing.as_ptr()).len, 0);
+        let said = fs_last_error(handle);
+        assert!(!said.is_null(), "the failed read gave no reason");
+        let text = unsafe { CStr::from_ptr(said) }.to_string_lossy().into_owned();
+        assert!(text.contains("nope"), "got {text}");
+
+        assert!(fs_last_error(handle).is_null(), "the same failure was reported twice");
         fs_close(handle);
     }
 
