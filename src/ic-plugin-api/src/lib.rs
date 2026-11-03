@@ -561,6 +561,26 @@ pub type IcFsRenameFn =
 pub type IcFsPermissionsFn =
     extern "C" fn(handle: IcFsHandle, path: *const c_char, mode: u32) -> c_int;
 
+/// The mirror of `IcStream`: that one is the host's, this one the plugin's.
+pub type IcFsStream = *mut c_void;
+
+/// One connection and one transfer, not a series of them.
+pub type IcFsStreamOpenFn =
+    extern "C" fn(handle: IcFsHandle, path: *const c_char, mode: u32) -> IcFsStream;
+
+/// 0 is the end of the file, -1 an error; short of `len` is neither.
+pub type IcFsStreamReadFn = extern "C" fn(stream: IcFsStream, into: *mut u8, len: u64) -> i64;
+
+pub type IcFsStreamWriteFn = extern "C" fn(stream: IcFsStream, from: *const u8, len: u64) -> i64;
+
+/// A write may only fail here, on the flush.
+pub type IcFsStreamCloseFn = extern "C" fn(stream: IcFsStream) -> c_int;
+
+/// Copies a file the mount already holds, without its bytes crossing the boundary. Anything but
+/// `IC_OK` and the host copies it the ordinary way instead.
+pub type IcFsCopyWithinFn =
+    extern "C" fn(handle: IcFsHandle, from: *const c_char, to: *const c_char) -> c_int;
+
 pub type IcShellHandle = *mut c_void;
 
 // One host thread drives all five in turn. `shell_read` returns promptly: empty slice when nothing is ready, null `data` once the shell has ended.
@@ -653,6 +673,15 @@ pub struct IcFsVTable {
     pub cell_clicked: Option<IcFsCellClickedFn>,
     /// Null means this filesystem cannot change permissions, and the host offers no chmod on it.
     pub set_permissions: Option<IcFsPermissionsFn>,
+
+    // Read as a set: a mount that leaves `stream_open` null is moved whole. The host calls
+    // them from the thread it opened the stream on, and closes what it opens.
+    pub stream_open: Option<IcFsStreamOpenFn>,
+    pub stream_read: Option<IcFsStreamReadFn>,
+    pub stream_write: Option<IcFsStreamWriteFn>,
+    pub stream_close: Option<IcFsStreamCloseFn>,
+    /// Asked before a copy that stays on this mount, where a server can do it itself.
+    pub copy_within: Option<IcFsCopyWithinFn>,
 }
 
 pub type IcViewDescribeFn =
@@ -1186,6 +1215,18 @@ pub struct IcHost {
         vtable: *const IcViewerVTable,
         user_data: *mut c_void,
     ) -> c_int,
+
+    /// How a plugin decides between a phone view and a tablet one.
+    pub screen: extern "C" fn() -> IcScreen,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IcScreen {
+    pub width_dp: u32,
+    pub height_dp: u32,
+    /// Unreliable on Android. Decide by `width_dp`.
+    pub scale: f32,
 }
 
 pub const IC_SETTING_PLAIN: u32 = 0;
@@ -1739,8 +1780,16 @@ pub mod testing {
         ) -> c_int {
             IC_OK
         }
+        extern "C" fn screen() -> IcScreen {
+            IcScreen {
+                width_dp: 0,
+                height_dp: 0,
+                scale: 1.0,
+            }
+        }
         IcHost {
             ask,
+            screen,
             magic: IC_HOST_MAGIC,
             struct_size: std::mem::size_of::<IcHost>() as u32,
             abi_version: IC_ABI_VERSION,

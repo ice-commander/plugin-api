@@ -210,6 +210,12 @@ typedef struct IcBytes {
     uint64_t len;
 } IcBytes;
 
+typedef struct IcScreen {
+    uint32_t width_dp;
+    uint32_t height_dp;
+    float scale;
+} IcScreen;
+
 /* A column a filesystem adds to the panel's own. */
 typedef struct IcFsColumn {
     const char *key;
@@ -267,6 +273,15 @@ typedef int (*IcShellResizeFn)(IcShellHandle shell, uint32_t rows, uint32_t cols
 typedef void (*IcShellCloseFn)(IcShellHandle shell);
 typedef int (*IcShellAvailableFn)(IcFsHandle handle);
 
+typedef void *IcFsStream;
+
+typedef IcFsStream (*IcFsStreamOpenFn)(IcFsHandle handle, const char *path, uint32_t mode);
+typedef int64_t (*IcFsStreamReadFn)(IcFsStream stream, uint8_t *into, uint64_t len);
+typedef int64_t (*IcFsStreamWriteFn)(IcFsStream stream, const uint8_t *from, uint64_t len);
+typedef int (*IcFsStreamCloseFn)(IcFsStream stream);
+/* Anything but IC_OK and the host copies the file the ordinary way instead. */
+typedef int (*IcFsCopyWithinFn)(IcFsHandle handle, const char *from, const char *to);
+
 /* Everything from `write` down may be NULL. */
 typedef struct IcFsVTable {
     uint32_t struct_size;
@@ -292,6 +307,12 @@ typedef struct IcFsVTable {
     IcFsCellClickedFn cell_clicked;
     /* NULL means this filesystem cannot change permissions, and the host offers no chmod on it. */
     IcFsPermissionsFn set_permissions;
+    /* A mount that leaves `stream_open` NULL is read and written whole. */
+    IcFsStreamOpenFn stream_open;
+    IcFsStreamReadFn stream_read;
+    IcFsStreamWriteFn stream_write;
+    IcFsStreamCloseFn stream_close;
+    IcFsCopyWithinFn copy_within;
 } IcFsVTable;
 
 /* Both answer JSON: a view document, and the reply to an event. */
@@ -495,6 +516,9 @@ typedef struct IcHost {
        last resort. */
     int (*register_viewer)(const char *viewer_id, const char *extensions, int32_t priority,
                            const IcViewerVTable *vtable, void *user_data);
+
+    /* How a plugin decides between a phone view and a tablet one. */
+    IcScreen (*screen)(void);
 } IcHost;
 
 typedef struct IcAbout {
