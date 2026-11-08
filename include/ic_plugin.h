@@ -1,31 +1,5 @@
-/* Ice Commander plugin interface, for plugins written in C.
- *
- * The same boundary `ic-plugin-api` declares in Rust, written out as a C
- * header; the layouts agree to the byte.
- *
- * What a plugin exports:
- *
- *     int  ic_plugin_init(const IcHost *host, const char *kind);   required
- *     void ic_plugin_shutdown(void);             optional
- *     const IcAbout *ic_plugin_about(void);      optional but wanted
- *     const char *ic_plugin_name(void);          optional
- *     const char *ic_plugin_version(void);       optional
- *
- * Rules that are not visible in the types:
- *
- *   - the host table is one instance for the process and outlives every
- *     plugin, so the pointer given to init may be kept and called later, from
- *     a thread of the plugin's own. Do not copy the table: it may be longer
- *     than this header knows, and a copy reads past the end of it;
- *   - check `magic`, `abi_version` and `struct_size` before calling anything,
- *     and never read a slot that lies beyond the `struct_size` you were given;
- *   - a vtable the plugin hands over is copied by the host, so it may live on
- *     the stack. What must stay alive is whatever its pointers point at;
- *   - every pointer a plugin answers with stays the plugin's to free, and must
- *     stay valid until the next call on that same handle;
- *   - a slot declared as a pointer to function may be NULL. The host then
- *     refuses that operation instead of calling through.
- */
+/* Ice Commander plugin ABI for C; layouts match ic-plugin-api byte for byte. Exports:
+ * ic_plugin_init (required), ic_plugin_shutdown, ic_plugin_about, ic_plugin_name, ic_plugin_version. */
 
 #ifndef IC_PLUGIN_H
 #define IC_PLUGIN_H
@@ -40,19 +14,19 @@ extern "C" {
 #define IC_HOST_MAGIC 0x49435f484f535400ull
 #define IC_ABI_VERSION 1u
 
-/* Which application the plugin was loaded into, given to ic_plugin_init:
-   a plugin decides what to register by it, and refuses to load by returning
-   anything but IC_OK. */
+/* The `kind` passed to ic_plugin_init; answer anything but IC_OK to decline loading. */
 #define IC_HOST_GTK "gtk"
 #define IC_HOST_WEB "web"
 #define IC_HOST_CONSOLE "console"
+#define IC_HOST_ANDROID "android"
 
 #define IC_OK 0
 #define IC_ERR_HOST_TOO_OLD 1
 #define IC_ERR_HOST_UNKNOWN 2
 #define IC_ERR_INIT_FAILED 3
+/* A failed filesystem call; the reason is in last_error. */
 #define IC_ERR_IO 4
-/* init answering "not in this application" — not a failure. */
+/* init declining this host. Not reported as a failure. */
 #define IC_ERR_NOT_THIS_HOST 5
 
 #define IC_SIDE_LEFT 0u
@@ -86,24 +60,23 @@ extern "C" {
 
 typedef void *IcFsHandle;
 typedef void *IcShellHandle;
-/* The filesystem a file lives on, and an open read or write upon it. Both
-   belong to the host: it alone knows whether what is underneath is a disk, a
-   server or another archive. */
+/* Host-owned and opaque to the plugin. */
 typedef void *IcFsSource;
+/* Host-owned. */
 typedef void *IcStream;
 
-/* How a stream is to be used. */
+/* Ask for no more than needed: a read-only source refuses IC_OPEN_WRITE. */
 #define IC_OPEN_READ 0u
 #define IC_OPEN_WRITE 1u   /* truncates, or makes the file */
 #define IC_OPEN_UPDATE 2u  /* reads and writes, keeping what is there */
+
+#define IC_SIZE_UNKNOWN 0
 
 #define IC_SEEK_SET 0u
 #define IC_SEEK_CURRENT 1u
 #define IC_SEEK_END 2u
 
-/* What a source does cheaply. These say what a thing COSTS, not what it
-   permits: a seek on a source without IC_FS_SEEK still works, and the host
-   pays for it. Read them to choose an algorithm, not to ask permission. */
+/* Costs, not permissions: seeking without IC_FS_SEEK still works, the host pays for it. */
 #define IC_FS_SEEK (1u << 0)
 #define IC_FS_SEQUENTIAL (1u << 1) /* forwards is cheap, backwards is not */
 #define IC_FS_WRITE (1u << 2)
@@ -129,7 +102,7 @@ typedef struct IcColumn {
     int32_t width;
 } IcColumn;
 
-/* A panel of rows. No header of its own, so this one can never grow. */
+/* No header, so it can never grow. */
 typedef struct IcTable {
     const IcColumn *columns;
     uint32_t column_count;
@@ -140,7 +113,7 @@ typedef struct IcTable {
 
 typedef IcTable (*IcTableFn)(void *user_data);
 
-/* The same, plus a flag per row saying whether it opens. */
+/* Like IcTable plus `enterable`; unlike it, can grow via struct_size. */
 typedef struct IcTree {
     uint64_t magic;
     uint32_t struct_size;
@@ -149,19 +122,24 @@ typedef struct IcTree {
     const char *const *cells;
     uint32_t row_count;
     uint32_t key_column;
+    /* Non-zero where the row opens; NULL means none do. */
     const int *enterable;
 } IcTree;
 
+/* `path` is empty at the root, otherwise the row keys joined by `/`. */
 typedef IcTree (*IcTreeFn)(const char *path, void *user_data);
 
-/* How ask reports what the user chose. Called once, on the frontend thread. */
+/* Called once, on the frontend thread. */
 typedef void (*IcAnswerFn)(const uint8_t *answer, uint64_t answer_len, void *user_data);
 
 typedef struct IcDrive {
+    /* Must stay the same across restarts: favourites hang off it. */
     const char *key;
     const char *name;
     const char *subtitle;
+    /* Passed to the connection kind's open when picked. */
     const char *settings;
+    /* NULL or empty uses the icon the source was registered with. */
     const char *svg;
     int online;
 } IcDrive;
@@ -173,12 +151,16 @@ typedef struct IcDrives {
     const IcDrive *rows;
 } IcDrives;
 
+/* Called on the frontend thread on every redraw; answer from memory, no I/O. */
 typedef IcDrives (*IcDrivesFn)(void *user_data);
 
+/* The user can neither rename nor delete it. */
 typedef struct IcPinnedConnection {
     const char *id;
     const char *title;
+    /* Empty uses the application's own icon. */
     const char *svg;
+    /* A register_view id; its describe gets this entry's `id`. */
     const char *view;
 } IcPinnedConnection;
 
@@ -189,6 +171,7 @@ typedef struct IcPinnedConnections {
     const IcPinnedConnection *rows;
 } IcPinnedConnections;
 
+/* Called on the frontend thread on every redraw. */
 typedef IcPinnedConnections (*IcPinnedConnectionsFn)(void *user_data);
 
 typedef struct IcDirEntry {
@@ -205,6 +188,7 @@ typedef struct IcListing {
     uint32_t count;
 } IcListing;
 
+/* Pointers a plugin answers with stay its own, valid until its next call on the same handle. */
 typedef struct IcBytes {
     const uint8_t *data;
     uint64_t len;
@@ -213,17 +197,20 @@ typedef struct IcBytes {
 typedef struct IcScreen {
     uint32_t width_dp;
     uint32_t height_dp;
+    /* Unreliable on Android; decide by width_dp. */
     float scale;
 } IcScreen;
 
-/* A column a filesystem adds to the panel's own. */
+/* A mount's own column; IcColumn is frozen. */
 typedef struct IcFsColumn {
     const char *key;
     const char *title;
     int32_t width;
+    /* IC_COLUMN_TEXT or IC_COLUMN_CHECK. */
     uint32_t kind;
 } IcFsColumn;
 
+/* Added after the panel's own columns, never replacing them. */
 typedef struct IcColumns {
     uint64_t magic;
     uint32_t struct_size;
@@ -233,7 +220,9 @@ typedef struct IcColumns {
 
 typedef struct IcRow {
     IcDirEntry entry;
+    /* One string per declared column, in order; a NULL array or cell reads as empty. */
     const char *const *extra;
+    /* Bounds every read of `extra`. */
     uint32_t extra_count;
 } IcRow;
 
@@ -244,15 +233,17 @@ typedef struct IcRows {
     const IcRow *items;
 } IcRows;
 
+/* `mount` is the one the press happened in; NULL if the panel has left it since. */
 typedef void (*IcFsClickFn)(IcFsHandle mount, void *user_data, void *parent);
+/* `dir` and `name` as list spelled them. The host lists again afterwards. */
 typedef int (*IcFsCellClickedFn)(IcFsHandle handle, const char *dir, const char *name,
                                  const char *column_key, int ticked);
+/* Mask of IC_ACTION_SHOWN, IC_ACTION_ENABLED, IC_ACTION_ON. Called on the frontend
+   thread on every toolbar refresh; answer from memory, no I/O. */
 typedef uint32_t (*IcFsActionStateFn)(IcFsHandle handle, const char *action_id);
 typedef IcColumns (*IcFsColumnsFn)(IcFsHandle handle);
 typedef IcRows (*IcFsRowsFn)(IcFsHandle handle, const char *path);
-/* Opened inside a file of another filesystem: an archive, a torrent. What is
-   handed over is the filesystem that file lives on and the path it lives at —
-   never its bytes. */
+/* Opens a mount inside a file on another filesystem: gets its source and path, never its bytes. */
 typedef IcFsHandle (*IcFsOpenInFn)(IcFsSource source, const char *path, void *user_data);
 typedef void (*IcFsCloseFn)(IcFsHandle handle);
 typedef IcListing (*IcFsListFn)(IcFsHandle handle, const char *path);
@@ -265,24 +256,36 @@ typedef int (*IcFsPathFn)(IcFsHandle handle, const char *path);
 typedef int (*IcFsRenameFn)(IcFsHandle handle, const char *from, const char *to);
 /* `mode` is the Unix permission bits, 07777 at most. */
 typedef int (*IcFsPermissionsFn)(IcFsHandle handle, const char *path, uint32_t mode);
+/* One host thread drives all five. shell_read must not block: empty when idle,
+   NULL `data` once the shell has ended. */
 typedef IcShellHandle (*IcShellOpenFn)(IcFsHandle handle, const char *cwd, uint32_t rows,
                                        uint32_t cols);
 typedef IcBytes (*IcShellReadFn)(IcShellHandle shell);
 typedef int (*IcShellWriteFn)(IcShellHandle shell, const uint8_t *bytes, uint64_t len);
 typedef int (*IcShellResizeFn)(IcShellHandle shell, uint32_t rows, uint32_t cols);
 typedef void (*IcShellCloseFn)(IcShellHandle shell);
+/* Per mount; absent means every mount has a shell iff shell_open is set. */
 typedef int (*IcShellAvailableFn)(IcFsHandle handle);
 
+/* The plugin's stream; IcStream is the host's. */
 typedef void *IcFsStream;
 
-typedef IcFsStream (*IcFsStreamOpenFn)(IcFsHandle handle, const char *path, uint32_t mode);
+/* One connection and one transfer. `size` is the byte count, 0 when not known. */
+typedef IcFsStream (*IcFsStreamOpenFn)(IcFsHandle handle, const char *path, uint32_t mode,
+                                       uint64_t size);
+/* 0 is the end of the file, -1 an error; short of `len` is neither. */
 typedef int64_t (*IcFsStreamReadFn)(IcFsStream stream, uint8_t *into, uint64_t len);
 typedef int64_t (*IcFsStreamWriteFn)(IcFsStream stream, const uint8_t *from, uint64_t len);
+/* A write may only fail here, on the flush. */
 typedef int (*IcFsStreamCloseFn)(IcFsStream stream);
-/* Anything but IC_OK and the host copies the file the ordinary way instead. */
+/* Replaces stream_close when the host abandons a write; the destination keeps what it had. */
+typedef void (*IcFsStreamAbortFn)(IcFsStream stream);
+/* Copies without the bytes crossing; anything but IC_OK falls back to an ordinary copy. */
 typedef int (*IcFsCopyWithinFn)(IcFsHandle handle, const char *from, const char *to);
+/* The file's real path on disk, for a mount over local files; NULL when none. */
+typedef const char *(*IcFsOnDiskFn)(IcFsHandle handle, const char *path);
 
-/* Everything from `write` down may be NULL. */
+/* Copied by the host; what its pointers point at must stay alive. Slots from `write` down may be NULL. */
 typedef struct IcFsVTable {
     uint32_t struct_size;
     IcFsOpenInFn open_in;
@@ -301,18 +304,24 @@ typedef struct IcFsVTable {
     IcShellResizeFn shell_resize;
     IcShellCloseFn shell_close;
     IcShellAvailableFn shell_available;
+    /* Asked once per listing, before the rows. */
     IcFsColumnsFn columns;
+    /* list with the cells for `columns`; preferred when both are set. */
     IcFsRowsFn list_rows;
+    /* NULL gives IC_ACTION_DEFAULT for every button. */
     IcFsActionStateFn action_state;
     IcFsCellClickedFn cell_clicked;
-    /* NULL means this filesystem cannot change permissions, and the host offers no chmod on it. */
+    /* NULL: no chmod is offered on this filesystem. */
     IcFsPermissionsFn set_permissions;
-    /* A mount that leaves `stream_open` NULL is read and written whole. */
+    /* NULL stream_open: files move whole. Called on the thread that opened the stream;
+       the host closes what it opens. */
     IcFsStreamOpenFn stream_open;
     IcFsStreamReadFn stream_read;
     IcFsStreamWriteFn stream_write;
     IcFsStreamCloseFn stream_close;
     IcFsCopyWithinFn copy_within;
+    IcFsOnDiskFn on_disk;
+    IcFsStreamAbortFn stream_abort;
 } IcFsVTable;
 
 /* Both answer JSON: a view document, and the reply to an event. */
@@ -329,7 +338,7 @@ typedef struct IcViewVTable {
 
 /* The "type" of an event handed to on_event. */
 #define IC_EVENT_OPENED "opened"
-/* Also what a key from the document's "keys" arrives as, with "node" naming that key's node. */
+/* Also sent for a key from the document's "keys"; "node" names its node. */
 #define IC_EVENT_ACTIVATE "activate"
 #define IC_EVENT_CHANGE "change"
 #define IC_EVENT_EXPAND "expand"
@@ -337,34 +346,19 @@ typedef struct IcViewVTable {
 /* A media node played to its end; "node" names it. */
 #define IC_EVENT_ENDED "ended"
 
-/* A viewer opened on one file: which window it is, the filesystem the file
-   lives on, and where on it. Never the bytes — the plugin reads what it needs
-   through fs_open and the calls beside it. */
+/* Gets the file's source and path, never its bytes: read through fs_open. */
 typedef int (*IcViewerOpenFn)(uint64_t instance, IcFsSource source, const char *path,
                               void *user_data);
-/* Pixels the plugin made rather than read: a page of a document, the picture
-   inside a camera file. Asked for when the application draws, so a plugin
-   holding a thousand-page document holds no pages. `name` is what the document
-   called it after `part:`. */
+/* Bytes for a `part:<name>` reference; the plugin's until it is asked again. */
 typedef IcBytes (*IcViewerContentFn)(uint64_t instance, const char *name, void *user_data);
 
-/* The describe and event context of a viewer carries "instance", so a plugin
-   showing two files at once knows which of them is being asked about. */
-
-/* What a plugin shows when the user asks to look at a file: a view with a file
-   behind it. The document it answers with names its pictures —
-   `file:<path>` for what is on the filesystem it was opened on,
-   `part:<name>` for what the plugin made — and never carries them. */
-/* Asked before a viewer's window closes: IC_OK lets it go, anything else keeps
-   it open and the window is described again, so a plugin that refuses can say
-   why in the same window. */
+/* IC_OK lets the window close. */
 typedef int (*IcViewerClosingFn)(uint64_t instance, void *user_data);
 
-/* The only drawing interface there is so far. */
+/* The only `api` so far; a plugin that does not know `api` draws nothing. */
 #define IC_CANVAS_GL 1u
 
-/* Where a plugin may put pixels of its own. get_proc_address is the host's,
-   because finding a GL symbol differs on every system. */
+/* Handed over once the host has a drawing surface; resolve GL symbols via get_proc_address. */
 typedef struct IcCanvas {
     uint32_t struct_size;
     uint32_t api;
@@ -372,7 +366,7 @@ typedef struct IcCanvas {
     void *proc_ctx;
 } IcCanvas;
 
-/* One frame's worth of where to draw. Width and height already carry the scale. */
+/* Width and height are in pixels, scale already applied. */
 typedef struct IcFrame {
     uint32_t struct_size;
     int32_t fbo;
@@ -381,23 +375,58 @@ typedef struct IcFrame {
     double scale;
 } IcFrame;
 
+/* The context is current. Answer IC_OK to be drawn. */
 typedef int (*IcCanvasReadyFn)(uint64_t instance, const IcCanvas *canvas, void *user_data);
+/* Frontend thread only, between canvas_ready and canvas_gone. */
 typedef void (*IcCanvasDrawFn)(uint64_t instance, const IcFrame *frame, void *user_data);
+/* Free what canvas_ready made; the context is still current. */
 typedef void (*IcCanvasGoneFn)(uint64_t instance, void *user_data);
 
+/* A view over one file; its context carries "instance". Pictures are named
+   `file:<path>` (on the viewer's source) or `part:<name>` (from content). */
 typedef struct IcViewerVTable {
     uint32_t struct_size;
     const IcViewVTable *view;
     IcViewerOpenFn open;
-    IcViewClosedFn closed;   /* may be NULL */
+    IcViewClosedFn closed;   /* may be NULL; the source must not be used after this */
     IcViewerContentFn content; /* may be NULL */
-    IcViewerClosingFn closing; /* may be NULL */
-    /* All three NULL together for a plugin that only describes windows. */
+    /* May be NULL. Anything but IC_OK keeps the window open and describes it again; closed
+       follows a real close. */
+    IcViewerClosingFn closing;
+    /* The three canvas slots are set or NULL together. */
     IcCanvasReadyFn canvas_ready;
     IcCanvasDrawFn canvas_draw;
     IcCanvasGoneFn canvas_gone;
 } IcViewerVTable;
 
+typedef int (*IcPlayerOpenFn)(IcFsSource source, const char *path, void *user_data);
+
+/* `of` is 0 while the length is not known. */
+typedef struct IcPlayedSoFar {
+    double at;
+    double of;
+    int paused;
+    int ended;
+} IcPlayedSoFar;
+
+typedef IcPlayedSoFar (*IcPlayerWhereFn)(void *user_data);
+typedef int (*IcPlayerPauseFn)(int paused, void *user_data);
+typedef int (*IcPlayerSeekFn)(double to, void *user_data);
+typedef int (*IcPlayerVolumeFn)(double volume, void *user_data);
+typedef void (*IcPlayerStopFn)(void *user_data);
+
+/* Only the sound: the list, the titles and the artwork stay with the application. */
+typedef struct IcPlayerVTable {
+    uint32_t struct_size;
+    IcPlayerOpenFn open;
+    IcPlayerWhereFn played_so_far;
+    IcPlayerPauseFn pause;
+    IcPlayerStopFn stop;
+    IcPlayerSeekFn seek;     /* may be NULL */
+    IcPlayerVolumeFn volume; /* may be NULL */
+} IcPlayerVTable;
+
+/* JSON of strings; the host adds "ic.connect_timeout_secs" and "ic.request_timeout_secs". */
 typedef IcFsHandle (*IcConnectionOpenFn)(const uint8_t *settings, uint64_t settings_len,
                                          void *user_data);
 
@@ -405,11 +434,13 @@ typedef struct IcConnectionVTable {
     uint32_t struct_size;
     IcConnectionOpenFn open;
     const IcFsVTable *fs;
+    /* May run off the frontend thread: only log_warn is safe to call back. */
     IcViewDescribeFn describe; /* may be NULL */
     IcViewEventFn on_event;    /* may be NULL */
 } IcConnectionVTable;
 
-/* The application's side. One instance for the process; grows only at the end. */
+/* One table per process, outliving every plugin; keep the pointer, never copy the table (it may be
+   longer than this header). Slots run on the init thread unless they say otherwise. Grows only at the end. */
 typedef struct IcHost {
     /* What a plugin checks before it trusts anything below. */
     uint64_t magic;
@@ -419,27 +450,34 @@ typedef struct IcHost {
 
     /* The host itself: what it is, what it says, what it keeps. */
     void (*log_warn)(const char *message);
+    /* Two-letter code of the UI language; valid for the process. */
     const char *(*language)(void);
     int (*register_locales)(const char *language, const uint8_t *catalogue, uint64_t catalogue_len);
+    /* Referred to as `asset:<plugin_id>/<name>`. */
     int (*register_plugin_asset)(const char *plugin_id, const char *name, const uint8_t *bytes,
                                  uint64_t bytes_len);
+    /* Empty when unset. Valid until the next call on this thread. */
     IcBytes (*settings_read)(const char *plugin_id, const char *key);
+    /* A NULL `bytes` deletes the key. `flags`: IC_SETTING_PLAIN or IC_SETTING_SECRET. */
     int (*settings_write)(const char *plugin_id, const char *key, const uint8_t *bytes,
                           uint64_t len, uint32_t flags);
-    /* One question put to the user; `answered` is called once with
-       {"button": "<id>", "text": "<typed>", "choice": "<option id>"}, text and choice only
-       when asked for. See ask in ic-plugin-api. */
+    /* `spec` JSON as documented on ask in ic-plugin-api. `answered` gets
+       {"button", "text"?, "choice"?} once; dismissal reports the first button. */
     int (*ask)(const uint8_t *spec, uint64_t spec_len, IcAnswerFn answered, void *user_data);
 
     /* The chrome a plugin may add to and hide. */
     int (*add_toolbar_button)(const char *id, const char *svg, const char *tooltip, uint32_t side,
                               int32_t priority, uint32_t enable_flags, IcClickFn on_click,
                               void *user_data);
+    /* Inside mounts of `extensions` (spelled as in register_filesystem). Default: shown. */
     int (*set_default_toolbar_visible)(const char *extensions, int shown);
     int (*add_header_button)(const char *id, const char *svg, const char *label, const char *tooltip,
                              uint32_t side, int32_t priority, IcClickFn on_click, void *user_data);
+    /* An empty label leaves only the icon. Callable from any thread. */
     int (*set_header_label)(const char *id, const char *label);
+    /* Callable from any thread. */
     int (*set_header_icon)(const char *id, const char *svg);
+    /* Callable from any thread. */
     int (*set_header_visible)(const char *id, int shown);
 
     /* Panels: what is in them, and what a plugin may put there. */
@@ -455,48 +493,50 @@ typedef struct IcHost {
                                void *user_data);
 
     /* Where the places in the sidebar come from. */
+    /* Extra entries in the drives list; picking one calls open of connection kind `kind`. */
     int (*register_drive_source)(const char *kind, const char *svg, IcDrivesFn rows,
                                  void *user_data);
+    /* Callable from any thread. */
     int (*drives_changed)(void);
+    /* An empty `schema`: the kind only mounts and is never offered for creation. */
     int (*register_connection_kind)(const char *id, const uint8_t *schema, uint64_t schema_len,
                                     const IcConnectionVTable *vtable, void *user_data);
+    /* Registering the same `id` again replaces the entries. */
     int (*register_pinned_connections)(const char *id, IcPinnedConnectionsFn rows,
                                        void *user_data);
+    /* Callable from any thread. */
     int (*pinned_connections_changed)(void);
 
     /* Filesystems a plugin brings, and telling the host they moved. */
+    /* The vtable runs on a worker thread; from there only log_warn is safe to call back. */
     int (*register_filesystem)(const char *extensions, const IcFsVTable *vtable, void *user_data);
+    /* Shown only inside mounts of `extensions` (spelled as in register_filesystem). */
     int (*register_fs_action)(const char *extensions, const char *action_id, const char *svg,
                               const char *tooltip, uint32_t enable_flags, uint32_t kind,
                               IcFsClickFn on_click, void *user_data);
+    /* Callable from any thread. */
     int (*fs_invalidate)(const char *extensions);
-    /* Says what the plugin changed, so whatever the host remembers about that
-       path is thrown away. An empty path means the whole filesystem. */
+    /* Drops what the host caches for `path` on `source`; an empty path means all of it. */
     int (*fs_changed)(IcFsSource source, const char *path);
 
-    /* Reading a filesystem the host already has, whoever brought it: the only
-       slots through which a plugin asks the application for something rather
-       than being handed it.
-       A source arrives with IcFsVTable::open_in and is good for as long as the
-       mount opened upon it; call them from the thread that handed it over,
-       while that call is running. */
+    /* A source comes from IcFsVTable::open_in, lives as long as that mount, and may only
+       be used on the thread of that call while it runs. */
+    /* IC_FS_* bits: a cost hint, not a permission. */
     uint32_t (*fs_caps)(IcFsSource source);
-    IcStream (*fs_open)(IcFsSource source, const char *path, uint32_t mode);
-    /* Bytes into the caller's buffer: 0 is the end, -1 an error, and a short
-       answer is not the end. */
+    /* `mode` is IC_OPEN_*; `size` the byte count, 0 when not known. NULL on failure. */
+    IcStream (*fs_open)(IcFsSource source, const char *path, uint32_t mode, uint64_t size);
+    /* 0 is the end, -1 an error; a short read is neither. */
     int64_t (*fs_read)(IcStream stream, uint8_t *into, uint64_t len);
-    /* The new position, or -1. Seeking to the end is how a length is asked
-       for, and a source that is not cheap to seek answers anyway. */
+    /* The new position or -1; `whence` is IC_SEEK_*. Works without IC_FS_SEEK, slower. */
     int64_t (*fs_seek)(IcStream stream, int64_t offset, uint32_t whence);
+    /* Bytes taken, or -1. */
     int64_t (*fs_write)(IcStream stream, const uint8_t *from, uint64_t len);
     int (*fs_truncate)(IcStream stream, uint64_t len);
+    /* Written data is flushed by the time this returns. */
     void (*fs_close)(IcStream stream);
-    /* The rows belong to the host and are good until the next call on this
-       thread. */
+    /* Host-owned rows, valid until the next call on this thread. */
     IcListing (*fs_list)(IcFsSource source, const char *path);
-    /* A real path for something that opens files itself — a player, a
-       renderer. The host copies when it must, and the copy lasts as long as
-       the source. NULL when it cannot. */
+    /* A real local path, copied if needed and kept as long as the source; NULL if impossible. */
     const char *(*fs_local_path)(IcFsSource source, const char *path);
 
     /* Documents the host draws on the plugin's behalf. */
@@ -504,37 +544,34 @@ typedef struct IcHost {
                          void *user_data);
     int (*open_view)(const char *id, const uint8_t *arg, uint64_t arg_len);
     int (*view_invalidate)(const char *id);
-    /* A plugin with a frame ready says so here and is asked to draw on the
-       frontend's own thread. */
+    /* Asks for canvas_draw on the frontend thread; never draw from a thread of your own. */
     int (*canvas_invalidate)(uint64_t instance);
 
-    /* Offers to show the files named by these extensions — ".png,.jpg,.nef",
-       spelled as register_filesystem spells them. By extension and nothing
-       else: the application does not read a file to find out what it is.
-       `priority` settles it when two plugins offer the same extension, the
-       larger winning; the application's own text and hex viewer is always the
-       last resort. */
+    /* `extensions` like ".png,.jpg", matched by name only. The larger `priority` wins;
+       the built-in text and hex viewer is always the fallback. */
     int (*register_viewer)(const char *viewer_id, const char *extensions, int32_t priority,
                            const IcViewerVTable *vtable, void *user_data);
 
-    /* How a plugin decides between a phone view and a tablet one. */
     IcScreen (*screen)(void);
+
+    /* Same extension list and priority rule as register_viewer. */
+    int (*register_player)(const char *player_id, const char *extensions, int32_t priority,
+                           const IcPlayerVTable *vtable, void *user_data);
 } IcHost;
 
 typedef struct IcAbout {
     uint64_t magic;
     uint32_t struct_size;
     uint32_t abi_version;
+    /* Stable identity, not the file name. */
     const char *id;
+    /* Plain Latin display name, not a translation key. */
     const char *name;
     const char *version;
     const char *description;
 } IcAbout;
 
-/* Whether a host is one this plugin can talk to at all, and whether it reaches
- * as far as the slot the plugin means to call. `needed` is the offset of that
- * slot plus the size of a pointer — the same arithmetic `needs_up_to` does on
- * the Rust side. */
+/* `needed` is IC_NEEDS_UP_TO(slot); check it before calling that slot. */
 static inline int ic_host_usable(const IcHost *host, uint32_t needed) {
     if (host == NULL) {
         return 0;

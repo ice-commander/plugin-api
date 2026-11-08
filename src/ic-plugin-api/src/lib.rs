@@ -8,13 +8,9 @@ pub const IC_OK: c_int = 0;
 pub const IC_ERR_HOST_TOO_OLD: c_int = 1;
 pub const IC_ERR_HOST_UNKNOWN: c_int = 2;
 pub const IC_ERR_INIT_FAILED: c_int = 3;
-/// A filesystem call that could not be carried out. The host only ever asks
-/// whether the answer was `IC_OK`, and reads `last_error` for the reason; this
-/// exists so a plugin need not answer a failed write with an init error.
+/// A failed filesystem call; the reason is in `last_error`.
 pub const IC_ERR_IO: c_int = 4;
-/// `init` answering "not in this application". Not a failure: a viewer of
-/// pictures in a terminal has nothing to draw, and the host says so quietly
-/// rather than reporting a plugin that would not load.
+/// `init` declining this host. Not reported as a failure.
 pub const IC_ERR_NOT_THIS_HOST: c_int = 5;
 
 pub type IcClickFn = extern "C" fn(user_data: *mut c_void, parent_window: *mut c_void);
@@ -147,9 +143,7 @@ pub type IcTableFn = extern "C" fn(user_data: *mut c_void) -> IcTable;
 
 pub const IC_TREE_MAGIC: u64 = 0x4943_5f54_5245_4500;
 
-/// Rows of a panel you can walk into. Same shape as `IcTable` plus a flag per
-/// row saying whether it opens, and a `struct_size` so it can grow: `IcTable`
-/// has no header and so is frozen.
+/// Like `IcTable` plus `enterable`; unlike it, can grow via `struct_size`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IcTree {
@@ -160,7 +154,7 @@ pub struct IcTree {
     pub cells: *const *const c_char,
     pub row_count: u32,
     pub key_column: u32,
-    /// One entry per row, non-zero where the row opens. Null means none do.
+    /// Non-zero where the row opens; null means none do.
     pub enterable: *const c_int,
 }
 
@@ -205,8 +199,7 @@ impl IcTree {
         )
     }
 
-    /// Whether this row opens. A plugin whose struct stops before this field
-    /// opens nothing, which is what a flat table means.
+    /// False when the plugin's struct ends before `enterable`.
     pub fn opens(&self, row: u32) -> bool {
         let known = std::mem::size_of::<IcTree>();
         if (self.struct_size as usize) < known || self.enterable.is_null() || row >= self.row_count
@@ -217,22 +210,17 @@ impl IcTree {
     }
 }
 
-/// `path` is empty at the root, and otherwise the row keys joined by `/`.
 pub const IC_DRIVES_MAGIC: u64 = 0x4943_5f44_5249_5645;
 
-/// One entry in the drives list, in the shape the application already shows:
-/// a name, a line under it, a key and whether it is reachable now.
 #[repr(C)]
 pub struct IcDrive {
-    /// What favourites and the active-drive highlight hang off, so it has to be
-    /// the same string across restarts.
+    /// Must stay the same across restarts: favourites hang off it.
     pub key: *const c_char,
     pub name: *const c_char,
     pub subtitle: *const c_char,
-    /// Handed to the connection kind's `open` when the user picks this entry.
+    /// Passed to the connection kind's `open` when picked.
     pub settings: *const c_char,
-    /// This row's own icon. Null or empty falls back to the one the source was
-    /// registered with, so a plugin whose entries all look alike says it once.
+    /// Null or empty uses the icon the source was registered with.
     pub svg: *const c_char,
     pub online: c_int,
 }
@@ -254,20 +242,19 @@ impl IcDrives {
     };
 }
 
-/// Asked every time the list is drawn, on the frontend's own thread, so it must
-/// answer from something the plugin already holds rather than go to a network.
+/// Called on the frontend thread on every redraw; answer from memory, no I/O.
 pub type IcDrivesFn = extern "C" fn(user_data: *mut c_void) -> IcDrives;
 
 pub const IC_PINNED_MAGIC: u64 = 0x4943_5f50_494e_4e00;
 
-/// An entry the plugin keeps in the connections list; the user can neither rename nor delete it.
+/// The user can neither rename nor delete it.
 #[repr(C)]
 pub struct IcPinnedConnection {
     pub id: *const c_char,
     pub title: *const c_char,
-    /// Empty leaves the application to draw its own.
+    /// Empty uses the application's own icon.
     pub svg: *const c_char,
-    /// A view from `register_view`; its `describe` is handed this entry's `id`.
+    /// A `register_view` id; its `describe` gets this entry's `id`.
     pub view: *const c_char,
 }
 
@@ -288,12 +275,13 @@ impl IcPinnedConnections {
     };
 }
 
-/// Asked every time the connections list is drawn, on the frontend's thread.
+/// Called on the frontend thread on every redraw.
 pub type IcPinnedConnectionsFn = extern "C" fn(user_data: *mut c_void) -> IcPinnedConnections;
 
+/// `path` is empty at the root, otherwise the row keys joined by `/`.
 pub type IcTreeFn = extern "C" fn(path: *const c_char, user_data: *mut c_void) -> IcTree;
 
-/// How `ask` reports what the user chose. Called once, on the frontend thread.
+/// Called once, on the frontend thread.
 pub type IcAnswerFn = extern "C" fn(answer: *const u8, answer_len: u64, user_data: *mut c_void);
 
 pub type IcFsHandle = *mut c_void;
@@ -316,6 +304,7 @@ pub struct IcListing {
     pub count: u32,
 }
 
+/// Pointers a plugin answers with stay its own, valid until its next call on the same handle.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IcBytes {
@@ -377,16 +366,11 @@ impl IcDirEntry {
 pub const IC_COLUMNS_MAGIC: u64 = 0x4943_5f43_4f4c_5300;
 pub const IC_ROWS_MAGIC: u64 = 0x4943_5f52_4f57_5300;
 
-/// What a mount's own column shows. Text is drawn and left alone; a tick is
-/// drawn as a box the user can click, and the click goes back to the plugin.
+/// `IcFsColumn::kind`. A check cell is clickable and reported to `cell_clicked`.
 pub const IC_COLUMN_TEXT: u32 = 0;
 pub const IC_COLUMN_CHECK: u32 = 1;
 
-/// A column of a mount's own.
-///
-/// `IcColumn` is what a panel source declares and is frozen — it sits in
-/// `IcTable`, which has no header to grow by — so a filesystem's columns, which
-/// need to say more, are their own shape.
+/// A mount's own column; `IcColumn` is frozen.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IcFsColumn {
@@ -397,8 +381,7 @@ pub struct IcFsColumn {
     pub kind: u32,
 }
 
-/// The columns a mount adds to the ones the panel draws by itself. They are
-/// added, never a replacement: name, size and date stay where they were.
+/// Added after the panel's own columns, never replacing them.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IcColumns {
@@ -429,25 +412,20 @@ fn text_at(ptr: *const c_char) -> String {
     unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string()
 }
 
-/// What a tick in a cell reads as. Anything that is not exactly this is not
-/// ticked, so a plugin that answers text into a tick column reads as unticked
-/// rather than as something undefined.
+/// Anything else reads as unticked.
 pub const IC_CELL_TICKED: &str = "1";
 
 pub fn cell_is_ticked(cell: &str) -> bool {
     cell == IC_CELL_TICKED
 }
 
-/// A directory entry plus the cells for those columns.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IcRow {
     pub entry: IcDirEntry,
-    /// One string per column the mount declared, in that order. A null array,
-    /// or a null cell, reads as empty.
+    /// One string per declared column, in order; a null array or cell reads as empty.
     pub extra: *const *const c_char,
-    /// How many strings `extra` really holds. A mount that declares more
-    /// columns than it fills leaves the rest empty rather than being read past.
+    /// Bounds every read of `extra`.
     pub extra_count: u32,
 }
 
@@ -502,9 +480,7 @@ impl IcRows {
 }
 
 impl IcRow {
-    /// The cell for column `index`, empty where the row does not reach that
-    /// far. The row's own count is what bounds the read, never the number of
-    /// columns the mount declared.
+    /// Empty past `extra_count`.
     pub fn extra_at(&self, index: usize) -> String {
         if self.extra.is_null() || index >= self.extra_count as usize {
             return String::new();
@@ -517,18 +493,11 @@ impl IcRow {
     }
 }
 
-/// A button that belongs to a mount is told which mount it was pressed in:
-/// two panels can stand in two different torrents at once, so the plugin
-/// cannot work it out from what it opened last. Null where the panel has left
-/// the mount between the press and the call.
+/// `mount` is the one the press happened in; null if the panel has left it since.
 pub type IcFsClickFn =
     extern "C" fn(mount: IcFsHandle, user_data: *mut c_void, parent: *mut c_void);
 
-/// Says a tick in one of this mount's own columns was clicked.
-///
-/// `dir` is the listing it happened in and `name` the row, spelled the way
-/// `list` answered them. The plugin decides what that means and what the cell
-/// reads as afterwards; the host lists again rather than assuming.
+/// `dir` and `name` as `list` spelled them. The host lists again afterwards.
 pub type IcFsCellClickedFn = extern "C" fn(
     handle: IcFsHandle,
     dir: *const c_char,
@@ -537,11 +506,8 @@ pub type IcFsCellClickedFn = extern "C" fn(
     ticked: c_int,
 ) -> c_int;
 
-/// What one of this mount's toolbar buttons looks like now: a mask of
-/// `IC_ACTION_SHOWN`, `IC_ACTION_ENABLED` and `IC_ACTION_ON`.
-///
-/// Asked on the frontend's own thread every time the toolbar is refreshed, so
-/// it must answer from what the mount already holds rather than go anywhere.
+/// Mask of `IC_ACTION_SHOWN`, `IC_ACTION_ENABLED`, `IC_ACTION_ON`. Called on the frontend
+/// thread on every toolbar refresh; answer from memory, no I/O.
 pub type IcFsActionStateFn = extern "C" fn(handle: IcFsHandle, action_id: *const c_char) -> u32;
 
 pub type IcFsColumnsFn = extern "C" fn(handle: IcFsHandle) -> IcColumns;
@@ -564,9 +530,9 @@ pub type IcFsPermissionsFn =
 /// The mirror of `IcStream`: that one is the host's, this one the plugin's.
 pub type IcFsStream = *mut c_void;
 
-/// One connection and one transfer, not a series of them.
+/// One connection and one transfer. `size` is the byte count, 0 when not known.
 pub type IcFsStreamOpenFn =
-    extern "C" fn(handle: IcFsHandle, path: *const c_char, mode: u32) -> IcFsStream;
+    extern "C" fn(handle: IcFsHandle, path: *const c_char, mode: u32, size: u64) -> IcFsStream;
 
 /// 0 is the end of the file, -1 an error; short of `len` is neither.
 pub type IcFsStreamReadFn = extern "C" fn(stream: IcFsStream, into: *mut u8, len: u64) -> i64;
@@ -576,14 +542,20 @@ pub type IcFsStreamWriteFn = extern "C" fn(stream: IcFsStream, from: *const u8, 
 /// A write may only fail here, on the flush.
 pub type IcFsStreamCloseFn = extern "C" fn(stream: IcFsStream) -> c_int;
 
-/// Copies a file the mount already holds, without its bytes crossing the boundary. Anything but
-/// `IC_OK` and the host copies it the ordinary way instead.
+/// Replaces `stream_close` when the host abandons a write; the destination keeps what it had.
+pub type IcFsStreamAbortFn = extern "C" fn(stream: IcFsStream);
+
+/// Copies without the bytes crossing; anything but `IC_OK` falls back to an ordinary copy.
 pub type IcFsCopyWithinFn =
     extern "C" fn(handle: IcFsHandle, from: *const c_char, to: *const c_char) -> c_int;
 
+/// The file's real path on disk, for a mount over local files; null when none.
+pub type IcFsOnDiskFn = extern "C" fn(handle: IcFsHandle, path: *const c_char) -> *const c_char;
+
 pub type IcShellHandle = *mut c_void;
 
-// One host thread drives all five in turn. `shell_read` returns promptly: empty slice when nothing is ready, null `data` once the shell has ended.
+// One host thread drives all five. `shell_read` must not block: empty when idle,
+// null `data` once the shell has ended.
 pub type IcShellOpenFn =
     extern "C" fn(handle: IcFsHandle, cwd: *const c_char, rows: u32, cols: u32) -> IcShellHandle;
 pub type IcShellReadFn = extern "C" fn(shell: IcShellHandle) -> IcBytes;
@@ -591,57 +563,46 @@ pub type IcShellWriteFn = extern "C" fn(shell: IcShellHandle, bytes: *const u8, 
 pub type IcShellResizeFn = extern "C" fn(shell: IcShellHandle, rows: u32, cols: u32) -> c_int;
 pub type IcShellCloseFn = extern "C" fn(shell: IcShellHandle);
 
-/// Whether *this* mount offers a shell. Absent means the answer is the same for
-/// every mount of the plugin: it has one if `shell_open` is filled in.
+/// Per mount; absent means every mount has a shell iff `shell_open` is set.
 pub type IcShellAvailableFn = extern "C" fn(handle: IcFsHandle) -> c_int;
 
-/// The filesystem a file lives on, as a plugin sees it. Opaque: it belongs to
-/// the host, which alone knows whether the bytes behind it are on a disk, on a
-/// server or inside another archive.
+/// Host-owned and opaque to the plugin.
 pub type IcFsSource = *mut c_void;
 
-/// An open read or write. The host holds whatever is underneath — a file
-/// descriptor, a connection, a decompressor — for as long as it is open.
+/// Host-owned.
 pub type IcStream = *mut c_void;
 
+/// Opens a mount inside a file on another filesystem: gets its source and path, never its bytes.
 pub type IcFsOpenInFn =
     extern "C" fn(source: IcFsSource, path: *const c_char, user_data: *mut c_void) -> IcFsHandle;
 
-/// How a stream is to be used. A plugin asks for no more than it needs: a
-/// source that cannot write refuses `IC_OPEN_WRITE` rather than pretending.
+/// Ask for no more than needed: a read-only source refuses `IC_OPEN_WRITE`.
 pub const IC_OPEN_READ: u32 = 0;
 /// Truncates what is there, or makes the file if it is not.
 pub const IC_OPEN_WRITE: u32 = 1;
 /// Reads and writes without truncating.
 pub const IC_OPEN_UPDATE: u32 = 2;
 
+pub const IC_SIZE_UNKNOWN: u64 = 0;
+
 pub const IC_SEEK_SET: u32 = 0;
 pub const IC_SEEK_CURRENT: u32 = 1;
 pub const IC_SEEK_END: u32 = 2;
 
-/// What a source can do cheaply. These say what a thing COSTS, not what it
-/// permits: a seek on a source without `IC_FS_SEEK` still works, and is paid
-/// for by the host fetching what it must. A plugin reads them to choose an
-/// algorithm — forwards through a tar, or jumping about a zip — not to decide
-/// whether it is allowed.
+/// Costs, not permissions: seeking without `IC_FS_SEEK` still works, the host pays for it.
 pub const IC_FS_SEEK: u32 = 1 << 0;
-/// Reading forwards is cheap; going back is not.
+/// Forward reads are cheap; seeking back is not.
 pub const IC_FS_SEQUENTIAL: u32 = 1 << 1;
 pub const IC_FS_WRITE: u32 = 1 << 2;
 pub const IC_FS_LIST: u32 = 1 << 3;
 /// `fs_local_path` can answer with a real path on this machine.
 pub const IC_FS_LOCAL_PATH: u32 = 1 << 4;
 
+/// Copied by the host; what its pointers point at must stay alive. `Option` slots may be null.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IcFsVTable {
     pub struct_size: u32,
-    /// Opened inside a file of another filesystem: an archive, a torrent.
-    ///
-    /// What is handed over is the filesystem that file lives on and the path
-    /// it lives at — never its bytes. The plugin reads what it needs through
-    /// `fs_open` and the calls beside it, which is how an archive on a server
-    /// opens without the server sending the whole of it.
     pub open_in: IcFsOpenInFn,
     pub close: extern "C" fn(handle: IcFsHandle),
     pub list: extern "C" fn(handle: IcFsHandle, path: *const c_char) -> IcListing,
@@ -658,32 +619,28 @@ pub struct IcFsVTable {
     pub shell_resize: Option<IcShellResizeFn>,
     pub shell_close: Option<IcShellCloseFn>,
     pub shell_available: Option<IcShellAvailableFn>,
-    /// The columns this mount adds to the panel's own. Asked once per
-    /// listing, before the rows.
+    /// Asked once per listing, before the rows.
     pub columns: Option<IcFsColumnsFn>,
-    /// The same listing as `list`, carrying the cells for those columns.
-    /// The host prefers it wherever both are filled in.
+    /// `list` with the cells for `columns`; preferred when both are set.
     pub list_rows: Option<IcFsRowsFn>,
-    /// Whether each of this mount's toolbar buttons is there, usable and
-    /// pressed. A mount that leaves this out gets `IC_ACTION_DEFAULT` for all
-    /// of them.
+    /// Absent gives `IC_ACTION_DEFAULT` for every button.
     pub action_state: Option<IcFsActionStateFn>,
-    /// A tick in one of this mount's own columns was clicked. A mount with no
-    /// tick columns never hears from this.
     pub cell_clicked: Option<IcFsCellClickedFn>,
-    /// Null means this filesystem cannot change permissions, and the host offers no chmod on it.
+    /// Null: no chmod is offered on this filesystem.
     pub set_permissions: Option<IcFsPermissionsFn>,
 
-    // Read as a set: a mount that leaves `stream_open` null is moved whole. The host calls
-    // them from the thread it opened the stream on, and closes what it opens.
+    // Null `stream_open`: files move whole. Called on the thread that opened the stream;
+    // the host closes what it opens.
     pub stream_open: Option<IcFsStreamOpenFn>,
     pub stream_read: Option<IcFsStreamReadFn>,
     pub stream_write: Option<IcFsStreamWriteFn>,
     pub stream_close: Option<IcFsStreamCloseFn>,
-    /// Asked before a copy that stays on this mount, where a server can do it itself.
     pub copy_within: Option<IcFsCopyWithinFn>,
+    pub on_disk: Option<IcFsOnDiskFn>,
+    pub stream_abort: Option<IcFsStreamAbortFn>,
 }
 
+/// Both answer JSON: a view document, and the reply to an event.
 pub type IcViewDescribeFn =
     extern "C" fn(ctx: *const u8, ctx_len: u64, user_data: *mut c_void) -> IcBytes;
 pub type IcViewEventFn =
@@ -701,7 +658,7 @@ pub struct IcViewVTable {
 
 // The `type` of an event handed to `on_event`.
 pub const IC_EVENT_OPENED: &str = "opened";
-/// Also what a key from the document's `keys` arrives as, with `node` naming that key's node.
+/// Also sent for a key from the document's `keys`; `node` names its node.
 pub const IC_EVENT_ACTIVATE: &str = "activate";
 pub const IC_EVENT_CHANGE: &str = "change";
 pub const IC_EVENT_EXPAND: &str = "expand";
@@ -709,10 +666,7 @@ pub const IC_EVENT_COLLAPSE: &str = "collapse";
 /// A `media` node played to its end; `node` names it.
 pub const IC_EVENT_ENDED: &str = "ended";
 
-/// A viewer opened on one file: which window it is, the filesystem the file
-/// lives on, and where on it. Never the bytes — the plugin reads what it needs
-/// through `fs_open` and the calls beside it, which is how a picture inside an
-/// archive on a server is shown without fetching the archive.
+/// Gets the file's source and path, never its bytes: read through `fs_open`.
 pub type IcViewerOpenFn = extern "C" fn(
     instance: u64,
     source: IcFsSource,
@@ -720,25 +674,14 @@ pub type IcViewerOpenFn = extern "C" fn(
     user_data: *mut c_void,
 ) -> c_int;
 
-/// Pixels the plugin made rather than read: a page of a document, the picture
-/// hidden inside a camera file. The host asks for them when it draws, and
-/// keeps only as many as it wants — so a plugin holding a thousand-page
-/// document holds no pages.
-///
-/// `name` is what the document called it after `part:`. The answer is the
-/// plugin's to keep alive until it is asked again.
+/// Bytes for a `part:<name>` reference; the plugin's until it is asked again.
 pub type IcViewerContentFn =
     extern "C" fn(instance: u64, name: *const c_char, user_data: *mut c_void) -> IcBytes;
 
-/// The only drawing interface there is so far. More would be new values, not a
-/// new slot: a plugin that does not know one draws nothing rather than guessing.
+/// The only `api` so far; a plugin that does not know `api` draws nothing.
 pub const IC_CANVAS_GL: u32 = 1;
 
-/// Where a plugin may put pixels of its own, handed over when the host has made
-/// the place for them.
-///
-/// `get_proc_address` is the host's, because finding a GL symbol is different on
-/// every system and a plugin should not carry three ways of doing it.
+/// Handed over once the host has a drawing surface; resolve GL symbols via `get_proc_address`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct IcCanvas {
@@ -748,8 +691,7 @@ pub struct IcCanvas {
     pub proc_ctx: *mut c_void,
 }
 
-/// One frame's worth of where to draw. Width and height already carry the scale,
-/// so a plugin never works it out for itself.
+/// Width and height are in pixels, scale already applied.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct IcFrame {
@@ -760,65 +702,74 @@ pub struct IcFrame {
     pub scale: f64,
 }
 
-/// The place is ready and the context is current. Answer `IC_OK` to be drawn.
+/// The context is current. Answer `IC_OK` to be drawn.
 pub type IcCanvasReadyFn =
     extern "C" fn(instance: u64, canvas: *const IcCanvas, user_data: *mut c_void) -> c_int;
 
-/// Draw one frame. Called on the frontend's own thread, and only between
-/// `canvas_ready` and `canvas_gone`.
+/// Frontend thread only, between `canvas_ready` and `canvas_gone`.
 pub type IcCanvasDrawFn =
     extern "C" fn(instance: u64, frame: *const IcFrame, user_data: *mut c_void);
 
-/// The place is going. Whatever was made in `canvas_ready` is let go here,
-/// while the context is still current.
+/// Free what `canvas_ready` made; the context is still current.
 pub type IcCanvasGoneFn = extern "C" fn(instance: u64, user_data: *mut c_void);
 
-/// What a plugin shows when the user asks to look at a file.
-///
-/// It is a view with a file behind it: the same `describe`, `on_event` and
-/// `closed` as any window the plugin puts up, and the document it answers with
-/// is drawn by whichever frontend is running. The context those are called
-/// with carries `"instance"`, so a plugin showing two files at once knows
-/// which of them is being asked about. A picture is a node naming where
-/// the picture is, not a buffer: `file:<path>` for what is on the
-/// filesystem the viewer was opened on, `part:<name>` for what the plugin made.
+/// A view over one file; its context carries `"instance"`. Pictures are named
+/// `file:<path>` (on the viewer's source) or `part:<name>` (from `content`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IcViewerVTable {
     pub struct_size: u32,
-    /// How the window describes itself and answers what is done in it.
     pub view: *const IcViewVTable,
     pub open: IcViewerOpenFn,
-    /// The window was closed; the source it was opened on is not to be used
-    /// again. Absent for a plugin that keeps nothing.
+    /// The source must not be used after this.
     pub closed: Option<IcViewClosedFn>,
-    /// Answers `part:` references. Absent for a plugin that only ever names
-    /// files it did not make.
+    /// Answers `part:` references.
     pub content: Option<IcViewerContentFn>,
-    /// The window is about to close, and the plugin may say no.
-    ///
-    /// `IC_OK` lets it close; anything else keeps it open, and the host then
-    /// asks the window to describe itself again — so a plugin that refuses can
-    /// put up what it wanted to say ("this is not saved") in the same window
-    /// rather than having to open another. `closed` still follows whenever the
-    /// window really does go.
-    ///
-    /// Absent for a plugin with nothing to lose, which is most of them.
+    /// Anything but `IC_OK` keeps the window open and describes it again; `closed` follows
+    /// a real close.
     pub closing: Option<IcViewerClosingFn>,
-    /// A `canvas` node in this plugin's document has somewhere to draw.
-    ///
-    /// All three are absent together for a plugin that only describes windows,
-    /// which is most of them. A document naming a `canvas` without them draws
-    /// nothing.
+    /// The three canvas slots are set or null together.
     pub canvas_ready: Option<IcCanvasReadyFn>,
     pub canvas_draw: Option<IcCanvasDrawFn>,
     pub canvas_gone: Option<IcCanvasGoneFn>,
 }
 
-/// Asked before a viewer's window closes. `IC_OK` lets it go; anything else
-/// keeps it open.
+/// `IC_OK` lets the window close.
 pub type IcViewerClosingFn = extern "C" fn(instance: u64, user_data: *mut c_void) -> c_int;
 
+pub type IcPlayerOpenFn =
+    extern "C" fn(source: IcFsSource, path: *const c_char, user_data: *mut c_void) -> c_int;
+
+/// `of` is 0 while the length is not known.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IcPlayedSoFar {
+    pub at: f64,
+    pub of: f64,
+    pub paused: c_int,
+    pub ended: c_int,
+}
+
+pub type IcPlayerWhereFn = extern "C" fn(user_data: *mut c_void) -> IcPlayedSoFar;
+pub type IcPlayerPauseFn = extern "C" fn(paused: c_int, user_data: *mut c_void) -> c_int;
+pub type IcPlayerSeekFn = extern "C" fn(to: f64, user_data: *mut c_void) -> c_int;
+pub type IcPlayerVolumeFn = extern "C" fn(volume: f64, user_data: *mut c_void) -> c_int;
+pub type IcPlayerStopFn = extern "C" fn(user_data: *mut c_void);
+
+/// Only the sound: the list, the titles and the artwork stay with the application.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IcPlayerVTable {
+    pub struct_size: u32,
+    pub open: IcPlayerOpenFn,
+    pub played_so_far: IcPlayerWhereFn,
+    pub pause: IcPlayerPauseFn,
+    pub stop: IcPlayerStopFn,
+    pub seek: Option<IcPlayerSeekFn>,
+    pub volume: Option<IcPlayerVolumeFn>,
+}
+
+/// JSON of strings; the host adds `ic.connect_timeout_secs` and `ic.request_timeout_secs`.
 pub type IcConnectionOpenFn =
     extern "C" fn(settings: *const u8, settings_len: u64, user_data: *mut c_void) -> IcFsHandle;
 
@@ -828,18 +779,10 @@ pub struct IcConnectionVTable {
     pub struct_size: u32,
     pub open: IcConnectionOpenFn,
     pub fs: *const IcFsVTable,
-    /// Answers with the form to put in front of the user, in place of the
-    /// document given at registration. A kind that offers this is asked every
-    /// time the form opens, so it can show what it knows now rather than what
-    /// it knew at startup.
-    ///
-    /// Called on whichever thread opened the form, which is not always the
-    /// frontend's: from here only `log_warn` is safe to call back.
+    /// The form to show instead of the registered schema; asked each time it opens.
+    /// May run off the frontend thread: only `log_warn` is safe to call back.
     pub describe: Option<IcViewDescribeFn>,
-    /// What the form's buttons and fields reach. Without it a connection form
-    /// is one-way — the user types and the host commits — and nothing the
-    /// plugin puts on the form can act. The answer is the same shape a view
-    /// answers with: `put`, `set`, `clipboard`, `redescribe`.
+    /// Events from the form, answered like a view (`put`, `set`, `clipboard`, `redescribe`).
     pub on_event: Option<IcViewEventFn>,
 }
 
@@ -864,45 +807,24 @@ pub fn enabled_for(flags: u32, files: u32, dirs: u32) -> bool {
     false
 }
 
-/// What a button scoped to a filesystem is: one that simply fires, or one that
-/// stays pressed. A plugin says which at registration, because the host has to
-/// draw the widget before any mount is open to ask.
+/// `kind` of `register_fs_action`.
 pub const IC_ACTION_BUTTON: u32 = 0;
 pub const IC_ACTION_TOGGLE: u32 = 1;
 
-/// What such a button looks like right now, as answered by `action_state`.
+/// Bits of the `action_state` answer.
 pub const IC_ACTION_SHOWN: u32 = 1 << 0;
 pub const IC_ACTION_ENABLED: u32 = 1 << 1;
-/// Pressed. Only means anything for `IC_ACTION_TOGGLE`.
+/// Pressed; only for `IC_ACTION_TOGGLE`.
 pub const IC_ACTION_ON: u32 = 1 << 2;
 
-/// What a mount that answers nothing is taken to mean: there and usable, and
-/// not pressed.
+/// Assumed for a mount without `action_state`.
 pub const IC_ACTION_DEFAULT: u32 = IC_ACTION_SHOWN | IC_ACTION_ENABLED;
 
 pub const IC_SIDE_LEFT: u32 = 0;
 pub const IC_SIDE_RIGHT: u32 = 1;
 
-/// The application's side of the boundary: one table of function pointers,
-/// built once and handed to every plugin as it starts.
-///
-/// After the header — the magic, the size and the ABI version — every field is
-/// a pointer of the same width, so what a plugin is given is an array of
-/// function pointers that happens to have names. The names are what keeps each
-/// slot's signature honest and what the growth test holds to its offset; the
-/// memory is the flat array either way.
-///
-/// **It grows only at the end.** A field put among the ones already here moves
-/// every one after it, and a plugin built against the shorter table then calls
-/// through the wrong offsets. The groups below are where a new slot would read
-/// naturally, not where it may be put.
-///
-/// **There is one table for the whole process and it outlives every plugin.**
-/// A plugin may keep the pointer it was handed in `ic_plugin_init` and call
-/// through it later, including from a thread of its own — which is how a
-/// plugin with work of its own says `drives_changed` or `fs_invalidate` long
-/// after init returned. Which slots are safe from which thread is said slot by
-/// slot below; the rest are for the thread that called init.
+/// One table per process, outliving every plugin; the pointer may be kept. Slots run on the
+/// init thread unless they say otherwise. Grows only at the end: never insert a field.
 #[repr(C)]
 pub struct IcHost {
     // What a plugin checks before it trusts anything below.
@@ -913,33 +835,20 @@ pub struct IcHost {
 
     // The host itself: what it is, what it says, what it keeps.
     pub log_warn: extern "C" fn(message: *const c_char),
-    /// The language the application is showing, as a two-letter code.
-    ///
-    /// A plugin registers its catalogue with `register_locales` and the host
-    /// translates what it is handed as a key. Text a plugin puts *inside* a
-    /// listing is never a key, so it has to pick the phrase itself, and this is
-    /// how it knows which one. The string stays valid for the process.
+    /// Two-letter code of the UI language; valid for the process.
     pub language: extern "C" fn() -> *const c_char,
     pub register_locales:
         extern "C" fn(language: *const c_char, catalogue: *const u8, catalogue_len: u64) -> c_int,
-    /// A picture or other file this plugin brings, kept under its own name.
-    /// Whatever refers to it says `asset:<plugin_id>/<name>`, so one plugin's
-    /// names can never stand in for another's.
+    /// Referred to as `asset:<plugin_id>/<name>`.
     pub register_plugin_asset: extern "C" fn(
         plugin_id: *const c_char,
         name: *const c_char,
         bytes: *const u8,
         bytes_len: u64,
     ) -> c_int,
-    /// Reads back what this plugin stored. Empty when there is nothing under
-    /// that key. The bytes stay valid until the next call on this thread.
+    /// Empty when unset. Valid until the next call on this thread.
     pub settings_read: extern "C" fn(plugin_id: *const c_char, key: *const c_char) -> IcBytes,
-    /// Stores a value under the plugin's own name. A null `bytes` forgets the
-    /// key. `flags` is `IC_SETTING_PLAIN` or `IC_SETTING_SECRET`.
-    ///
-    /// The id is the plugin's own, taken from its `IcAbout`. The host uses it
-    /// to keep plugins out of each other's keys; it is a tidiness boundary, not
-    /// a security one — a plugin shares the process and can reach anything.
+    /// A null `bytes` deletes the key. `flags`: `IC_SETTING_PLAIN` or `IC_SETTING_SECRET`.
     pub settings_write: extern "C" fn(
         plugin_id: *const c_char,
         key: *const c_char,
@@ -947,44 +856,8 @@ pub struct IcHost {
         len: u64,
         flags: u32,
     ) -> c_int,
-    /// Puts one question to the user and answers through `answered`.
-    ///
-    /// For the small things every plugin needs and none should have to build:
-    /// are you sure, what shall it be called. A plugin that wants a window of
-    /// its own still registers a view; this is for the one-liners, and the
-    /// frontend draws them in whatever way suits it — a dialogue on the
-    /// desktop, a prompt in a terminal, a sheet in a browser.
-    ///
-    /// `spec` is JSON:
-    ///
-    /// ```json
-    /// {
-    ///   "heading": { "tr": "registry.delete_key", "en": "Delete this key?" },
-    ///   "body":    { "tr": "registry.delete_warning", "en": "Everything in it goes too." },
-    ///   "detail":  "HKLM/SOFTWARE/Example",
-    ///   "input":   { "variant": "text", "value": "NewKey", "placeholder": { "en": "Name" } },
-    ///   "choice":  { "value": "REG_SZ", "options": [
-    ///                  { "id": "REG_SZ",    "label": { "en": "String" } },
-    ///                  { "id": "REG_DWORD", "label": { "en": "32-bit number" } } ] },
-    ///   "buttons": [
-    ///     { "id": "cancel", "label": { "tr": "common.cancel", "en": "Cancel" } },
-    ///     { "id": "delete", "label": { "tr": "common.delete", "en": "Delete" }, "role": "destructive" }
-    ///   ]
-    /// }
-    /// ```
-    ///
-    /// Everything but `buttons` may be left out. `input` turns it into a
-    /// prompt; `choice` offers a list, with `value` naming the option it opens
-    /// on. Both together are how one question collects a name and a kind.
-    /// Text is either a plain string or the same `{tr, en}` pair the view
-    /// documents use, so the host translates it.
-    ///
-    /// `answered` is called once, on the frontend's thread, with
-    /// `{"button": "<id>", "text": "<typed>", "choice": "<option id>"}`.
-    /// `text` and `choice` are each absent when they were not asked for. A
-    /// question dismissed rather than answered — Escape, the window closed —
-    /// reports the id of the first button, which is why the way out belongs
-    /// first in the list.
+    /// `spec`: JSON with `buttons` [{id, label, role}] and optional heading, body, detail, input, choice.
+    /// `answered` gets `{"button", "text"?, "choice"?}` once; dismissal reports the first button.
     pub ask: extern "C" fn(
         spec: *const u8,
         spec_len: u64,
@@ -1003,16 +876,7 @@ pub struct IcHost {
         on_click: IcClickFn,
         user_data: *mut c_void,
     ) -> c_int,
-    /// Whether the panel's own toolbar buttons are shown while standing in a
-    /// filesystem of this plugin's, or whether the plugin draws the toolbar
-    /// itself out of what `register_fs_action` put there.
-    ///
-    /// Declared here rather than asked of the filesystem: what a toolbar
-    /// looks like is no business of a thing that stores files, and the same
-    /// filesystem answers a web frontend and a console that have no toolbar
-    /// at all. `extensions` is spelled as in `register_filesystem`.
-    ///
-    /// A plugin that says nothing keeps the toolbar it always had.
+    /// Inside mounts of `extensions` (spelled as in `register_filesystem`). Default: shown.
     pub set_default_toolbar_visible:
         extern "C" fn(extensions: *const c_char, shown: c_int) -> c_int,
     pub add_header_button: extern "C" fn(
@@ -1025,21 +889,11 @@ pub struct IcHost {
         on_click: IcClickFn,
         user_data: *mut c_void,
     ) -> c_int,
-    /// Replaces the text beside a header button this plugin added. An empty
-    /// label leaves the button with nothing but its icon. Safe to call from a
-    /// thread of the plugin's own: the host carries it to the frontend.
+    /// An empty label leaves only the icon. Callable from any thread.
     pub set_header_label: extern "C" fn(id: *const c_char, label: *const c_char) -> c_int,
-    /// Replaces the picture on a header button this plugin added.
-    ///
-    /// Fixed at registration would mean a button that cannot say what state
-    /// it is in — signed in or out, reachable or not — and an indicator that
-    /// cannot is half an indicator. Safe to call from a thread of the
-    /// plugin's own: the host carries it to the frontend.
+    /// Callable from any thread.
     pub set_header_icon: extern "C" fn(id: *const c_char, svg: *const c_char) -> c_int,
-    /// Shows or hides a header button this plugin added. A button that has
-    /// nothing to say is better absent than greyed out, and an indicator is
-    /// the case for it: it appears when there is activity and goes when there
-    /// is none. Safe to call from a thread of the plugin's own.
+    /// Callable from any thread.
     pub set_header_visible: extern "C" fn(id: *const c_char, shown: c_int) -> c_int,
 
     // Panels: what is in them, and what a plugin may put there.
@@ -1062,9 +916,6 @@ pub struct IcHost {
         on_click: IcClickFn,
         user_data: *mut c_void,
     ) -> c_int,
-    /// A panel whose rows can be walked into, for a plugin whose contents are
-    /// discovered rather than stored. Otherwise the same as a panel source, and
-    /// it appears in the same place.
     pub register_panel_tree: extern "C" fn(
         id: *const c_char,
         title: *const c_char,
@@ -1074,22 +925,17 @@ pub struct IcHost {
     ) -> c_int,
 
     // Where the places in the sidebar come from.
-    /// Entries to show beside the local disks and the saved connections, in the
-    /// drives dropdown and on the start page alike. `kind` names the connection
-    /// kind that mounts them, so picking one goes through the same `open` as a
-    /// connection the user saved.
+    /// Extra entries in the drives list; picking one calls `open` of connection kind `kind`.
     pub register_drive_source: extern "C" fn(
         kind: *const c_char,
-        // One picture for every entry; empty leaves the application to draw reachability.
+        // One icon for every entry; empty draws reachability instead.
         svg: *const c_char,
         rows: IcDrivesFn,
         user_data: *mut c_void,
     ) -> c_int,
-    /// Says the answer to `IcDrivesFn` has changed, so the lists are worth
-    /// drawing again. Safe to call from a thread of the plugin's own: the host
-    /// carries it to the frontend.
+    /// Callable from any thread.
     pub drives_changed: extern "C" fn() -> c_int,
-    /// An empty `schema` declares a kind that only mounts and is never offered to create.
+    /// An empty `schema`: the kind only mounts and is never offered for creation.
     pub register_connection_kind: extern "C" fn(
         id: *const c_char,
         schema: *const u8,
@@ -1107,19 +953,13 @@ pub struct IcHost {
     pub pinned_connections_changed: extern "C" fn() -> c_int,
 
     // Filesystems a plugin brings, and telling the host they moved.
-    // Called on a worker thread; from there only `log_warn` is safe to call back.
+    // The vtable runs on a worker thread; from there only `log_warn` is safe to call back.
     pub register_filesystem: extern "C" fn(
         extensions: *const c_char,
         vtable: *const IcFsVTable,
         user_data: *mut c_void,
     ) -> c_int,
-    /// A toolbar button that belongs to a filesystem of this plugin's rather
-    /// than to the application. It appears only while the user stands inside a
-    /// mount of one of `extensions`, and goes away on the way out.
-    ///
-    /// `extensions` is written the same way as in `register_filesystem`, and
-    /// naming an extension the plugin never registered leaves a button that is
-    /// never shown.
+    /// Shown only inside mounts of `extensions` (spelled as in `register_filesystem`).
     pub register_fs_action: extern "C" fn(
         extensions: *const c_char,
         action_id: *const c_char,
@@ -1131,56 +971,29 @@ pub struct IcHost {
         on_click: IcFsClickFn,
         user_data: *mut c_void,
     ) -> c_int,
-    /// Says the mount's listing is out of date, so the panel standing in it is
-    /// worth listing again. Safe to call from a thread of the plugin's own.
+    /// Callable from any thread.
     pub fs_invalidate: extern "C" fn(extensions: *const c_char) -> c_int,
-    /// Says what the plugin changed at `path` on that filesystem, so whatever
-    /// the host remembers about it is thrown away. An empty path means the
-    /// whole of it.
+    /// Drops what the host caches for `path` on `source`; an empty path means all of it.
     pub fs_changed: extern "C" fn(source: IcFsSource, path: *const c_char) -> c_int,
 
-    // Reading a filesystem the host already has, whoever brought it.
-    //
-    // The only slots through which a plugin asks the application for
-    // something rather than being handed it. A source arrives with
-    // `IcFsVTable::open_in`; it is the host's, and it is good for as long as
-    // the mount that was opened on it.
-    //
-    // These are called from the thread the source was handed to, while that
-    // call is running. A plugin that keeps a source and calls from a thread
-    // of its own is asking the host to read a filesystem from somewhere it
-    // does not own.
-    /// What this source does cheaply: `IC_FS_SEEK`, `IC_FS_SEQUENTIAL` and the
-    /// rest. A hint for choosing an algorithm, not a permission.
+    // A source from `open_in` lives as long as that mount, used only on that call's thread.
+    /// `IC_FS_*` bits: a cost hint, not a permission.
     pub fs_caps: extern "C" fn(source: IcFsSource) -> u32,
-    /// Opens one file on that filesystem. `mode` is `IC_OPEN_READ`,
-    /// `IC_OPEN_WRITE` or `IC_OPEN_UPDATE`. Null when it cannot be opened.
-    pub fs_open: extern "C" fn(source: IcFsSource, path: *const c_char, mode: u32) -> IcStream,
-    /// Fills `into` with at most `len` bytes and says how many arrived. Zero
-    /// is the end of the file, -1 an error; a short answer is not the end.
+    /// `mode` is `IC_OPEN_*`; `size` the byte count, 0 when not known. Null on failure.
+    pub fs_open:
+        extern "C" fn(source: IcFsSource, path: *const c_char, mode: u32, size: u64) -> IcStream,
+    /// 0 is the end, -1 an error; a short read is neither.
     pub fs_read: extern "C" fn(stream: IcStream, into: *mut u8, len: u64) -> i64,
-    /// Moves the read along and answers the new position, or -1. `whence` is
-    /// `IC_SEEK_SET`, `IC_SEEK_CURRENT` or `IC_SEEK_END`; seeking to the end
-    /// is how the length of a file is asked for.
-    ///
-    /// A source that says nothing about `IC_FS_SEEK` still answers this —
-    /// the host pays for it, by fetching what it has to. That is deliberate:
-    /// a plugin should not carry a copy of the file about just because the
-    /// thing underneath it happens to be a slow network.
+    /// The new position or -1; `whence` is `IC_SEEK_*`. Works without `IC_FS_SEEK`, slower.
     pub fs_seek: extern "C" fn(stream: IcStream, offset: i64, whence: u32) -> i64,
-    /// Writes from `from` and says how many bytes were taken, or -1.
+    /// Bytes taken, or -1.
     pub fs_write: extern "C" fn(stream: IcStream, from: *const u8, len: u64) -> i64,
-    /// Cuts the file to `len` bytes.
     pub fs_truncate: extern "C" fn(stream: IcStream, len: u64) -> c_int,
-    /// Finishes with the stream. Anything written is on its way to where it
-    /// belongs by the time this returns.
+    /// Written data is flushed by the time this returns.
     pub fs_close: extern "C" fn(stream: IcStream),
-    /// What that filesystem holds at `path`. The rows belong to the host and
-    /// are good until the next call on this thread.
+    /// Host-owned rows, valid until the next call on this thread.
     pub fs_list: extern "C" fn(source: IcFsSource, path: *const c_char) -> IcListing,
-    /// A real path on this machine for something that needs one — a player, a
-    /// renderer that opens files itself. The host makes a copy when it has to,
-    /// and the copy lasts as long as the source. Null when it cannot.
+    /// A real local path, copied if needed and kept as long as the source; null if impossible.
     pub fs_local_path: extern "C" fn(source: IcFsSource, path: *const c_char) -> *const c_char,
 
     // Documents the host draws on the plugin's behalf.
@@ -1192,22 +1005,11 @@ pub struct IcHost {
     ) -> c_int,
     pub open_view: extern "C" fn(id: *const c_char, arg: *const u8, arg_len: u64) -> c_int,
     pub view_invalidate: extern "C" fn(id: *const c_char) -> c_int,
-    /// A plugin with a frame ready says so here and is asked to draw on the
-    /// frontend's own thread. It never draws from the thread that decoded.
+    /// Asks for `canvas_draw` on the frontend thread; never draw from a thread of your own.
     pub canvas_invalidate: extern "C" fn(instance: u64) -> c_int,
 
-    /// Offers to show the files named by these extensions — `".png,.jpg,.nef"`,
-    /// spelled as `register_filesystem` spells them.
-    ///
-    /// By extension and nothing else: the application does not read a file to
-    /// find out what it is. Reading the first bytes of everything on a server
-    /// costs a request per file for a name it already has, and a file that
-    /// lies about its extension is shown as what it called itself — which is
-    /// the honest answer and what the built-in viewer does anyway.
-    ///
-    /// `priority` settles it when two plugins offer the same extension; the
-    /// larger wins, and the application's own text and hex viewer is always
-    /// the last resort, including when no plugin offers anything at all.
+    /// `extensions` like `".png,.jpg"`, matched by name only. The larger `priority` wins;
+    /// the built-in text and hex viewer is always the fallback.
     pub register_viewer: extern "C" fn(
         viewer_id: *const c_char,
         extensions: *const c_char,
@@ -1216,8 +1018,16 @@ pub struct IcHost {
         user_data: *mut c_void,
     ) -> c_int,
 
-    /// How a plugin decides between a phone view and a tablet one.
     pub screen: extern "C" fn() -> IcScreen,
+
+    /// Same extension list and priority rule as `register_viewer`.
+    pub register_player: extern "C" fn(
+        player_id: *const c_char,
+        extensions: *const c_char,
+        priority: i32,
+        vtable: *const IcPlayerVTable,
+        user_data: *mut c_void,
+    ) -> c_int,
 }
 
 #[repr(C)]
@@ -1225,50 +1035,45 @@ pub struct IcHost {
 pub struct IcScreen {
     pub width_dp: u32,
     pub height_dp: u32,
-    /// Unreliable on Android. Decide by `width_dp`.
+    /// Unreliable on Android; decide by `width_dp`.
     pub scale: f32,
 }
 
 pub const IC_SETTING_PLAIN: u32 = 0;
-/// Stored through the application's secret store rather than in plain text.
+/// Stored in the system secret store.
 pub const IC_SETTING_SECRET: u32 = 1 << 0;
 
-/// Which application a plugin has been loaded into.
-///
-/// A plugin decides what to register by it, and may decline to load at all:
-/// a viewer of documents has nothing to draw in a terminal, and a player that
-/// leans on the browser's own can offer more formats there than on a desktop
-/// whose codecs are somebody else's problem. Refusing is returning anything
-/// but `IC_OK` from `init`.
+/// The `kind` passed to `init`; answer anything but `IC_OK` to decline loading.
 pub const IC_HOST_GTK: &str = "gtk";
 pub const IC_HOST_WEB: &str = "web";
 pub const IC_HOST_CONSOLE: &str = "console";
+
+pub const IC_HOST_ANDROID: &str = "android";
+
+pub fn draws_with_gtk(kind: &str) -> bool {
+    kind == IC_HOST_GTK || kind == IC_HOST_ANDROID
+}
 
 pub type IcPluginInit = extern "C" fn(host: *const IcHost, kind: *const c_char) -> c_int;
 
 pub const IC_PLUGIN_INIT_SYMBOL: &[u8] = b"ic_plugin_init";
 
-/// Called once on an orderly exit, before the libraries are let go. Optional:
-/// a plugin that owns no background work needs none. The host gives it a short
-/// budget and carries on regardless, so a hung plugin cannot block the exit.
+/// Optional. Called once on an orderly exit, with a short time budget the host does not wait past.
 pub type IcPluginShutdown = extern "C" fn();
 
 pub const IC_PLUGIN_SHUTDOWN_SYMBOL: &[u8] = b"ic_plugin_shutdown";
 
 pub const IC_ABOUT_MAGIC: u64 = 0x4943_5f41_424f_5554;
 
-/// What a plugin says about itself. Read before `ic_plugin_init`, so the host can
-/// list a plugin it is not going to load. Grows by appending only: the reader
-/// trusts nothing past `struct_size`.
+/// Read before `init`. Grows only at the end; nothing past `struct_size` is read.
 #[repr(C)]
 pub struct IcAbout {
     pub magic: u64,
     pub struct_size: u32,
     pub abi_version: u32,
-    /// Stable machine identity, not the file name.
+    /// Stable identity, not the file name.
     pub id: *const c_char,
-    /// Plain Latin display name, hardcoded by the plugin. Not a translation key:
-    /// a plugin cannot rely on the host holding a dictionary for it.
+    /// Plain Latin display name, not a translation key.
     pub name: *const c_char,
     pub version: *const c_char,
     pub description: *const c_char,
@@ -1278,18 +1083,14 @@ pub type IcPluginAbout = extern "C" fn() -> *const IcAbout;
 
 pub const IC_PLUGIN_ABOUT_SYMBOL: &[u8] = b"ic_plugin_about";
 
-/// The two facts every plugin must be able to state, each as a function of its
-/// own. A plugin can export just these and nothing else: no struct to get
-/// right, no host table to hold. `ic_plugin_about` is the fuller answer, and
-/// what it fills in wins; these fill whatever it left empty.
+/// Fallbacks where `ic_plugin_about` left a field empty; `ic_plugin_about` wins.
 pub type IcPluginText = extern "C" fn() -> *const c_char;
 
 pub const IC_PLUGIN_NAME_SYMBOL: &[u8] = b"ic_plugin_name";
 pub const IC_PLUGIN_VERSION_SYMBOL: &[u8] = b"ic_plugin_version";
 
 impl IcAbout {
-    /// Builds the struct a plugin hands back. The pointers must outlive the
-    /// call, so in practice they are `b"...\0"` literals.
+    /// The pointers must outlive the plugin: use `b"...\0"` literals.
     pub const fn new(
         id: *const c_char,
         name: *const c_char,
@@ -1308,18 +1109,14 @@ impl IcAbout {
     }
 }
 
-/// Lets `IcAbout` sit in a `static`. Sound only because every pointer in it
-/// points at a `'static` literal, which [`declare_about!`] is what guarantees.
+/// Sound only because [`declare_about!`] fills it with `'static` literals.
 #[repr(transparent)]
 pub struct AboutSlot(pub IcAbout);
 
 unsafe impl Sync for AboutSlot {}
 
-/// Exports `ic_plugin_about`, `ic_plugin_name` and `ic_plugin_version` together.
-///
-/// Every argument must expand to a string literal, so a generated
-/// `macro_rules!` returning one is a valid version — which is how the plugin
-/// repository feeds in the version its build wrote.
+/// Exports `ic_plugin_about`, `ic_plugin_name` and `ic_plugin_version`.
+/// Every argument must expand to a string literal.
 #[macro_export]
 macro_rules! declare_about {
     ($id:expr, $name:expr, $version:expr, $description:expr) => {
@@ -1346,7 +1143,7 @@ macro_rules! declare_about {
     };
 }
 
-/// A field of `IcAbout` the plugin actually claimed to have filled in.
+/// `None` past the `struct_size` the plugin claimed.
 pub fn about_field<T: Copy>(about: *const IcAbout, offset: usize) -> Option<T> {
     if about.is_null() {
         return None;
@@ -1378,11 +1175,7 @@ pub struct BoundedVTable {
 
 impl BoundedVTable {
     /// # Safety
-    ///
-    /// `vtable` must either be null or point to at least `claimed` readable
-    /// bytes, where `claimed` is the `u32` it starts with. That is the plugin's
-    /// side of the bargain: a table says how big it is and the host reads no
-    /// further than the smaller of what it claims and what the host knows.
+    /// `vtable` is null or readable for the `u32` size it starts with.
     pub unsafe fn adopt(vtable: *const u8, known: usize) -> Option<BoundedVTable> {
         if vtable.is_null() || known < std::mem::size_of::<u32>() {
             return None;
@@ -1480,6 +1273,10 @@ pub fn needs_plugin_assets() -> u32 {
     needs_up_to(std::mem::offset_of!(IcHost, register_plugin_asset))
 }
 
+pub fn needs_player() -> u32 {
+    needs_up_to(std::mem::offset_of!(IcHost, register_player))
+}
+
 pub fn host_has(host: *const IcHost, needs: u32) -> bool {
     if host.is_null() {
         return false;
@@ -1526,10 +1323,7 @@ pub fn check_host(host: *const IcHost, needs_abi: u32, needs_size: u32) -> HostC
     HostCheck::Ok
 }
 
-/// Pieces for a plugin's own tests: a host table that answers everything and
-/// does nothing.
-///
-/// Behind the `testing` feature, so nothing of it reaches a shipped plugin.
+/// A do-nothing host table for plugin tests; behind the `testing` feature.
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::*;
@@ -1714,7 +1508,7 @@ pub mod testing {
         IC_FS_SEEK | IC_FS_LIST
     }
 
-    extern "C" fn host_fs_open(_: IcFsSource, _: *const c_char, _: u32) -> IcStream {
+    extern "C" fn host_fs_open(_: IcFsSource, _: *const c_char, _: u32, _: u64) -> IcStream {
         std::ptr::null_mut()
     }
 
@@ -1758,19 +1552,21 @@ pub mod testing {
         IC_OK
     }
 
+    extern "C" fn reg_player(
+        _: *const c_char,
+        _: *const c_char,
+        _: i32,
+        _: *const IcPlayerVTable,
+        _: *mut c_void,
+    ) -> c_int {
+        IC_OK
+    }
+
     extern "C" fn invalidate_canvas(_: u64) -> c_int {
         IC_OK
     }
 
-    /// A host table with every slot filled in and nothing behind any of them.
-    ///
-    /// For a plugin's own tests: `init` can be called with this, and the few
-    /// calls a test cares about replaced one field at a time —
-    ///
-    /// ```ignore
-    /// let mut host = ic_plugin_api::testing::silent_host();
-    /// host.fs_open = my_fs_open;
-    /// ```
+    /// Every slot filled, nothing behind them; replace the fields a test needs.
     pub fn silent_host() -> IcHost {
         extern "C" fn ask(
             _spec: *const u8,
@@ -1790,6 +1586,7 @@ pub mod testing {
         IcHost {
             ask,
             screen,
+            register_player: reg_player,
             magic: IC_HOST_MAGIC,
             struct_size: std::mem::size_of::<IcHost>() as u32,
             abi_version: IC_ABI_VERSION,

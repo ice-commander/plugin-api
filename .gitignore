@@ -1,8 +1,6 @@
 bin/*
 !bin/.gitkeep
 
-# Where cargo puts things when `.cargo/config.toml` is not in force — an
-# explicit `--target-dir`, or a checkout that predates it.
 target/
 
 .vscode/
