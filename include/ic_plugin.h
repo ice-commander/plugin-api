@@ -557,6 +557,9 @@ typedef struct IcHost {
     /* Same extension list and priority rule as register_viewer. */
     int (*register_player)(const char *player_id, const char *extensions, int32_t priority,
                            const IcPlayerVTable *vtable, void *user_data);
+
+    /* Platform-specific; IC_ERR_NOT_THIS_HOST where nothing handles `name`. Callable from any thread. */
+    int (*platform_call)(const char *plugin_id, const char *name, const char *value);
 } IcHost;
 
 typedef struct IcAbout {

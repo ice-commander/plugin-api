@@ -1028,6 +1028,10 @@ pub struct IcHost {
         vtable: *const IcPlayerVTable,
         user_data: *mut c_void,
     ) -> c_int,
+
+    /// Platform-specific; `IC_ERR_NOT_THIS_HOST` where nothing handles `name`. Callable from any thread.
+    pub platform_call:
+        extern "C" fn(plugin_id: *const c_char, name: *const c_char, value: *const c_char) -> c_int,
 }
 
 #[repr(C)]
@@ -1163,7 +1167,7 @@ pub fn about_field<T: Copy>(about: *const IcAbout, offset: usize) -> Option<T> {
 
 impl IcHost {
     pub fn offset_of_end() -> u32 {
-        std::mem::size_of::<IcHost>() as u32
+        needs_up_to(std::mem::offset_of!(IcHost, platform_call))
     }
 }
 
@@ -1275,6 +1279,10 @@ pub fn needs_plugin_assets() -> u32 {
 
 pub fn needs_player() -> u32 {
     needs_up_to(std::mem::offset_of!(IcHost, register_player))
+}
+
+pub fn needs_platform_call() -> u32 {
+    needs_up_to(std::mem::offset_of!(IcHost, platform_call))
 }
 
 pub fn host_has(host: *const IcHost, needs: u32) -> bool {
@@ -1566,6 +1574,10 @@ pub mod testing {
         IC_OK
     }
 
+    extern "C" fn nothing_handles(_: *const c_char, _: *const c_char, _: *const c_char) -> c_int {
+        IC_ERR_NOT_THIS_HOST
+    }
+
     /// Every slot filled, nothing behind them; replace the fields a test needs.
     pub fn silent_host() -> IcHost {
         extern "C" fn ask(
@@ -1587,8 +1599,9 @@ pub mod testing {
             ask,
             screen,
             register_player: reg_player,
+            platform_call: nothing_handles,
             magic: IC_HOST_MAGIC,
-            struct_size: std::mem::size_of::<IcHost>() as u32,
+            struct_size: IcHost::offset_of_end(),
             abi_version: IC_ABI_VERSION,
             host_version: version,
             log_warn: warn,
